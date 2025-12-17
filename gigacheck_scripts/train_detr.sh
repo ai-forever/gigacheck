@@ -1,0 +1,42 @@
+export TOKENIZERS_PARALLELISM="false"
+
+accelerate launch --num_processes 8 gigacheck/train/scripts/train_detr_model.py \
+    --pretrained_model_name "mistralai/Mistral-7B-v0.3" \
+    --train_data_path "/data/detection/bilingual/train.jsonl" \
+    --eval_data_path "/data/detection/bilingual/valid.jsonl" \
+    --extractor_dtype "bfloat16" \
+    --max_sequence_length 1024 \
+    --min_sequence_length 100 \
+    --random_sequence_length True \
+    --num_queries 45 \
+    --dec_layers 3 \
+    --enc_layers 3 \
+    --dn_detr True \
+    --aux_loss True \
+    --model_dim 256 \
+    --use_focal_loss True \
+    --label_loss_coef 2.0 \
+    --query_initialization_method "default" \
+    --special_ref_points True \
+    --output_dir "train_logs/dn_detr_bilingual" \
+    --num_train_epochs 150 \
+    --warmup_steps 100 \
+    --lr_scheduler_type "cosine_with_min_lr" \
+    --lr_scheduler_kwargs '{"min_lr_rate": 0.5}' \
+    --learning_rate 0.0002 \
+    --weight_decay 0.0001 \
+    --optim "adamw_torch" \
+    --per_device_train_batch_size 64 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 1 \
+    --save_strategy "epoch" \
+    --eval_strategy "epoch" \
+    --eval_accumulation_steps 1 \
+    --metric_for_best_model "eval_mAP@0.5-0.95" \
+    --save_total_limit 2 \
+    --logging_strategy "steps" \
+    --logging_steps 1 \
+    --seed 8888 \
+    --dataloader_num_workers 8 \
+    --gradient_checkpointing False \
+    --report_to tensorboard
