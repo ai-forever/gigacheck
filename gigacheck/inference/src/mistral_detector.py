@@ -1,4 +1,3 @@
-import os.path
 from typing import Any, Dict, Tuple, List
 import numpy as np
 
@@ -46,15 +45,15 @@ class MistralDetector:
     def max_len(self) -> int:
         return self._max_len
 
-    def _from_pretrained_multitask(self, base_model_path, device_map):
+    def _from_pretrained_multitask(self, base_model_path, device_map, **kwargs):
         if self.with_detr:
-            model = self._from_pretrained_detr(base_model_path, device_map)
+            model = self._from_pretrained_detr(base_model_path, device_map, **kwargs)
         else:
-            model = self._from_pretrained_classifier(base_model_path, device_map)
+            model = self._from_pretrained_classifier(base_model_path, device_map, **kwargs)
 
         return model
 
-    def _from_pretrained_detr(self, base_model_path, device_map):
+    def _from_pretrained_detr(self, base_model_path, device_map, **kwargs):
         pretrain_conf = PretrainedConfig.from_pretrained(base_model_path)
         detr_config = pretrain_conf.detr_config
         num_labels = pretrain_conf.num_labels
@@ -62,16 +61,17 @@ class MistralDetector:
         if pretrain_conf.to_dict().get("trained_classification_head", True) is False:
             self.trained_classification_head = False
 
-        kwargs = {
+        additional_kwargs = {
             "num_labels": num_labels,
             "max_length": self._max_len,
             "with_detr": self.with_detr,
             "detr_config": detr_config,
+            "device_map": device_map,
+            "torch_dtype": torch.float32,
         }
+        additional_kwargs.update(kwargs)
 
-        model = MistralAIDetectorForSequenceClassification.from_pretrained(
-            base_model_path, device_map=device_map, torch_dtype=torch.float32, **kwargs
-        )
+        model = MistralAIDetectorForSequenceClassification.from_pretrained(base_model_path, **additional_kwargs)
 
         extractor_dtype = getattr(torch, pretrain_conf.detr_config["extractor_dtype"])
         logger.info(f"Using dtype={extractor_dtype} for {type(model.model)}")
@@ -81,33 +81,35 @@ class MistralDetector:
 
         return model
 
-    def _from_pretrained_classifier(self, base_model_path, device_map):
+    def _from_pretrained_classifier(self, base_model_path, device_map, **kwargs):
         pretrain_conf = PretrainedConfig.from_pretrained(base_model_path)
         num_labels = pretrain_conf.num_labels
 
         assert num_labels, "Number of labels must be not 0."
 
-        kwargs = {
+        additional_kwargs = {
             "num_labels": num_labels,
             "max_length": self._max_len,
             "with_detr": self.with_detr,
+            "device_map": device_map,
+            "torch_dtype": "auto",
         }
-        model = MistralAIDetectorForSequenceClassification.from_pretrained(
-            base_model_path,
-            device_map=device_map,
-            torch_dtype="auto",
-            **kwargs
-        )
+        additional_kwargs.update(kwargs)
+        model = MistralAIDetectorForSequenceClassification.from_pretrained(base_model_path, **additional_kwargs)
 
         return model
 
-    def from_pretrained(self, base_model_path):
+    def from_pretrained(self, base_model_path, model: MistralAIDetectorForSequenceClassification = None, **kwargs):
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_path)
 
-        device_map = self.device
-        self.model = self._from_pretrained_multitask(base_model_path, device_map)
+        if model is None:
+            device_map = self.device
+            self.model = self._from_pretrained_multitask(base_model_path, device_map, **kwargs)
 
-        logger.info(f"{self.model.dtype=} max_len: {self._max_len}")
+            logger.info(f"{self.model.dtype=} max_len: {self._max_len}")
+        else:
+            self.model = model
+
         self.model.eval()
 
         self.model.config.max_length = self._max_len
@@ -159,45 +161,46 @@ class MistralDetector:
 
         return final_preds
 
+    @torch.no_grad()
     def predict(self, text: str) -> Dict[str, Any]:
-        assert self.model is not None, "Model must be initialized"
+        assert self.model is not None, "Model must be initialized, call from_pretrained() method."
 
         tokens, mask, text_len, n_tokens = self._get_tokens(text)
-        with torch.no_grad():
-            output = self.model(
-                tokens,
-                attention_mask=mask,
-                return_dict=True,
-                return_detr_output=self.with_detr,
-            )
-            if self.debug:
-                logger.info(f"Raw output: {output.logits}; id2label: {self.id2label} ")
 
-            if not self.with_detr:
-                logits = output.logits[0]
-                probs = logits.to(torch.float32).softmax(dim=-1)
-                probs = probs.detach().cpu().numpy()
-                cls_ind = int(np.argmax(probs))
+        output = self.model(
+            tokens,
+            attention_mask=mask,
+            return_dict=True,
+            return_detr_output=self.with_detr,
+        )
+        if self.debug:
+            logger.info(f"Raw output: {output.logits}; id2label: {self.id2label} ")
+
+        if not self.with_detr:
+            logits = output.logits[0]
+            probs = logits.to(torch.float32).softmax(dim=-1)
+            probs = probs.detach().cpu().numpy()
+            cls_ind = int(np.argmax(probs))
+            pred_label = self.id2label[cls_ind]
+
+            return {"pred_label": pred_label, "classification_head_probs": probs}
+        else:
+            # ai / human / mixed classification
+            main_logits, detr_out = output.logits
+            ai_intervals: List[np.ndarray] = self._get_ai_intervals(detr_out, [text_len])
+            ai_intervals = ai_intervals[0]
+
+            if self.trained_classification_head:
+                main_probs = main_logits.to(torch.float32).softmax(dim=-1)
+                main_probs = main_probs.detach().cpu().numpy()
+                main_probs = main_probs[0]
+                cls_ind = int(np.argmax(main_probs))
                 pred_label = self.id2label[cls_ind]
-
-                return {"pred_label": pred_label, "classification_head_probs": probs}
+                return {"pred_label": pred_label,
+                        "classification_head_probs": main_probs,
+                        "ai_intervals": ai_intervals}
             else:
-                # ai / human / mixed classification
-                main_logits, detr_out = output.logits
-                ai_intervals: List[np.ndarray] = self._get_ai_intervals(detr_out, [text_len])
-                ai_intervals = ai_intervals[0]
-
-                if self.trained_classification_head:
-                    main_probs = main_logits.to(torch.float32).softmax(dim=-1)
-                    main_probs = main_probs.detach().cpu().numpy()
-                    main_probs = main_probs[0]
-                    cls_ind = int(np.argmax(main_probs))
-                    pred_label = self.id2label[cls_ind]
-                    return {"pred_label": pred_label,
-                            "classification_head_probs": main_probs,
-                            "ai_intervals": ai_intervals}
-                else:
-                    return {"ai_intervals": ai_intervals}
+                return {"ai_intervals": ai_intervals}
 
 
 def to_absolete(pred_spans: torch.Tensor, text_len: int) -> torch.Tensor:

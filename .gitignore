@@ -25,6 +25,7 @@
 **.bin
 **.vsix
 **.0
+gigacheck.egg-info/
 
 # mypy
 .mypy_cache/
