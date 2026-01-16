@@ -22,7 +22,7 @@ setup(
     project_urls={},
     author="Layer Team, SberAI",
     author_email="",
-    packages=find_packages(include=["gigacheck"]),  # required
+    packages=find_packages(include=["gigacheck", "gigacheck.*"]),  # required
     include_package_data=True,
     install_requires=REQUIREMENTS,
     classifiers=[
