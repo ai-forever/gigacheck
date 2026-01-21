@@ -103,6 +103,8 @@ You need to have a dataset in '.jsonl' file. Each line in the following format:
 }
 ```
 
+> **NOTE:** We provide the **CoAuthor** dataset converted into our specific format for training and validation. The original data (sourced from [minalee-research/coauthor-interface](https://github.com/minalee-research/coauthor-interface)) has been pre-processed to match the schema described below. You can download the ready-to-use files here: [link](https://drive.google.com/drive/folders/1jnEdqJh5mN-luh4VAy3G-8HEJuYfp9Vl).
+
 #### Training
 
 ```bash
