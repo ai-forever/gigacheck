@@ -178,7 +178,7 @@ If you use this repository, datasets or models in your research, please cite our
   Eprint = {arXiv:2509.21269}
 }
 @article{tolstykh2024gigacheck,
-  title={{GigaCheck: Detecting LLM-generated Content}},
+  title={{GigaCheck: Detecting LLM-generated Content via Object-Centric Span Localization}},
   author={Irina Tolstykh and Aleksandra Tsybina and Sergey Yakubson and Aleksandr Gordeev and Vladimir Dokholyan and Maksim Kuprashevich},
   journal={arXiv preprint arXiv:2410.23728},
   year={2024}
