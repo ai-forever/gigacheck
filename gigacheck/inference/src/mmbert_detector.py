@@ -2,13 +2,13 @@ import torch
 from loguru import logger
 from intervaltree import Interval, IntervalTree
 
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, ModernBertForSequenceClassification
 
-from gigacheck.model.mistral_ai_detector import MistralAIDetectorForSequenceClassification
+from gigacheck.model.mmbert_ai_detector import ModernBertAIDetectorForSequenceClassification
 from gigacheck.inference.src.ai_detector import AIDetector
 
 
-class MistralDetector(AIDetector):
+class ModernBertDetector(AIDetector):
 
     def _from_pretrained_detr(self, base_model_path, device_map):
         pretrain_conf = PretrainedConfig.from_pretrained(base_model_path)
@@ -25,11 +25,12 @@ class MistralDetector(AIDetector):
             "detr_config": detr_config,
         }
 
-        model = MistralAIDetectorForSequenceClassification.from_pretrained(
-                base_model_path,
-                device_map=device_map,
-                torch_dtype=torch.float32,
-                **kwargs,
+        model = ModernBertAIDetectorForSequenceClassification.from_pretrained(
+            base_model_path,
+            device_map=device_map,
+            torch_dtype=torch.float32,
+            **kwargs,
+            key_mapping={"decoder.weight": "model.embeddings.tok_embeddings.weight"},
         )
 
         extractor_dtype = getattr(torch, pretrain_conf.detr_config["extractor_dtype"])
@@ -48,13 +49,12 @@ class MistralDetector(AIDetector):
         num_labels = pretrain_conf.num_labels
 
         assert num_labels, "Number of labels must be not 0."
-        model = MistralAIDetectorForSequenceClassification.from_pretrained(
-                base_model_path,
-                device_map=device_map,
-                torch_dtype="auto",
-                max_sequence_length=self._max_len,
-                with_detr=self.with_detr,
-                num_labels=num_labels,
+        model = ModernBertForSequenceClassification.from_pretrained(
+            pretrained_model_name_or_path=base_model_path,
+            device_map=device_map,
+            torch_dtype="auto",
+            config=pretrain_conf,
+            key_mapping={"decoder.weight": "model.embeddings.tok_embeddings.weight"},
         )
 
         return model

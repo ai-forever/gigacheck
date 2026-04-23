@@ -1,0 +1,186 @@
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Tuple, List, Union
+import numpy as np
+import os
+
+import torch
+from loguru import logger
+from intervaltree import Interval, IntervalTree
+
+from transformers import (
+    AutoTokenizer,
+    PreTrainedTokenizer,
+)
+
+from gigacheck.model.mistral_ai_detector import MistralAIDetectorForSequenceClassification
+from gigacheck.model.mmbert_ai_detector import ModernBertAIDetectorForSequenceClassification
+from gigacheck.model.src.interval_detector.span_utils import span_cxw_to_xx
+
+LOCAL_RANK = os.environ.get("LOCAL_RANK", -1)
+
+
+class AIDetector(ABC):
+    def __init__(
+        self,
+        max_seq_len: int,
+        with_detr: bool,
+        id2label: Dict[int, str],
+        device: str = "cuda:0",
+        verbose: bool = True,
+        debug: bool = False,
+        conf_interval_thresh: float = 0.8,
+    ):
+        self._name = "NewMistralDetector"
+        self.verbose = verbose
+        self.debug = debug
+        self.device = device
+        self.with_detr = with_detr
+        self._max_len = max_seq_len
+        self.conf_interval_thresh = conf_interval_thresh
+
+        self.tokenizer: PreTrainedTokenizer = None
+        self.model: Union[MistralAIDetectorForSequenceClassification, ModernBertAIDetectorForSequenceClassification] = None
+        self.id2label: Dict[int, str] = id2label
+        self.trained_classification_head = True
+
+        if self.device is None and int(os.environ.get("WORLD_SIZE", 0)):
+            self.device = f"cuda:{LOCAL_RANK}"
+
+        if self.with_detr:
+            assert len(self.id2label) == 3
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def max_len(self) -> int:
+        return self._max_len
+
+    def _from_pretrained_multitask(self, base_model_path, device_map):
+        if self.with_detr:
+            model = self._from_pretrained_detr(base_model_path, device_map)
+        else:
+            model = self._from_pretrained_classifier(base_model_path, device_map)
+
+        return model
+
+    @abstractmethod
+    def _from_pretrained_detr(self, base_model_path, device_map):
+        pass
+
+    @abstractmethod
+    def _from_pretrained_classifier(self, base_model_path, device_map):
+        pass
+
+    def from_pretrained(self, base_model_path):
+        self._name = self._name + "_" + "_".join(base_model_path.split("/")[-2:])
+        self.tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+
+        device_map = self.device if self.device is not None else "auto"
+        self.model = self._from_pretrained_multitask(base_model_path, device_map)
+
+        logger.info(f"Model device: {self.model.device} {self.model.dtype=} max_len: {self._max_len}")
+        self.model.eval()
+
+        self.model.config.max_sequence_length = self._max_len
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
+        self.model.config.bos_token_id = self.tokenizer.bos_token_id
+        self.model.config.eos_token_id = self.tokenizer.eos_token_id
+        self.model.config.unk_token_id = self.tokenizer.unk_token_id
+
+        return self
+
+    def _get_tokens(self, text: str) -> Tuple[torch.tensor, torch.tensor, int, int]:
+        assert self._max_len is not None and self.tokenizer is not None, "Model must be initialized"
+
+        tokens = self.tokenizer(text, add_special_tokens=False).input_ids
+        n_tokens = len(tokens)
+
+        if len(tokens) > self._max_len - 2:
+            tokens = tokens[: self._max_len - 2]
+            cur_text = self.tokenizer.convert_tokens_to_string(self.tokenizer.convert_ids_to_tokens(tokens))
+            text_len = len(cur_text)
+        else:
+            text_len = len(text)
+
+        tokens = torch.tensor([self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id])
+        used_tokens = len(tokens)
+
+        tokens = tokens.unsqueeze(0)
+        mask = torch.ones_like(tokens)
+
+        if n_tokens > self._max_len - 2:
+            logger.debug(f"Use only {used_tokens} tokens from {n_tokens} ({len(text.split(' '))} all words)")
+
+        logger.debug(f"Use tokens: {used_tokens}. Max tokens: {self._max_len}")
+
+        return tokens.to(self.device), mask.to(self.device), text_len, n_tokens
+
+    def _get_ai_intervals(self, detr_out: Dict[str, torch.Tensor], text_lens: List[int]) -> List[np.ndarray]:
+        pred_spans = detr_out["pred_spans"].detach()
+        src_logits = detr_out["pred_logits"].detach()  # (batch_size, #queries, #classes=2)
+        assert len(text_lens) == pred_spans.shape[0]
+
+        # take probs for foreground objects only (ind = 0)
+        pred_probs = torch.softmax(src_logits, -1)[:, :, 0:1]
+        spans = torch.stack([to_absolete(pred_spans[i], text_lens[i]) for i in range(len(text_lens))], dim=0)
+
+        # concat spans and scores
+        preds = torch.cat([spans, pred_probs], dim=2)  # xx, prob
+        final_preds = [text_preds[text_preds[:, 2] > self.conf_interval_thresh].cpu().numpy() for text_preds in preds]
+
+        return final_preds
+
+    def predict(self, text: str) -> Dict[str, Any]:
+        assert self.model is not None, "Model must be initialized"
+
+        tokens, mask, text_len, n_tokens = self._get_tokens(text)
+        with torch.no_grad():
+            output = self.model(
+                tokens,
+                attention_mask=mask,
+                return_dict=True,
+                return_detr_output=self.with_detr,
+            )
+            if self.debug:
+                logger.info(f"Raw output: {output.logits}; id2label: {self.id2label} ")
+
+            if not self.with_detr:
+                logits = output.logits[0]
+                probs = logits.to(torch.float32).softmax(dim=-1)
+                probs = probs.detach().cpu().numpy()
+                cls_ind = int(np.argmax(probs))
+                pred_label = self.id2label[cls_ind]
+
+                return {"pred_label": pred_label, "classification_head_probs": probs}
+            else:
+                # ai / human / mixed classification
+                main_logits, detr_out = output.logits
+                ai_intervals: List[np.ndarray] = self._get_ai_intervals(detr_out, [text_len])
+                ai_intervals = ai_intervals[0]
+
+                if self.trained_classification_head:
+                    main_probs = main_logits.to(torch.float32).softmax(dim=-1)
+                    main_probs = main_probs.detach().cpu().numpy()
+                    main_probs = main_probs[0]
+                    cls_ind = int(np.argmax(main_probs))
+                    pred_label = self.id2label[cls_ind]
+                    return {"pred_label": pred_label,
+                            "classification_head_probs": main_probs,
+                            "ai_intervals": ai_intervals}
+                else:
+                    return {"ai_intervals": ai_intervals}
+
+
+def to_absolete(pred_spans: torch.Tensor, text_len: int) -> torch.Tensor:
+    spans = span_cxw_to_xx(pred_spans) * text_len
+    return torch.clamp(spans, 0, text_len)
+
+
+def merge_intervals(ai_intervals: np.ndarray) -> List[Tuple[int, int]]:
+
+    intervals = IntervalTree(Interval(begin, end, prob) for (begin, end, prob) in ai_intervals)
+    intervals.merge_overlaps(strict=False)
+    ai_intervals = [(int(i.begin), int(i.end)) for i in sorted(intervals)]
+    return ai_intervals
