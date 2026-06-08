@@ -11,6 +11,7 @@
   <a href="https://huggingface.co/datasets/iitolstykh/LLMTrace_classification"> 🤗 LLMTrace - Classification Dataset </a> | 
   <a href="https://huggingface.co/iitolstykh/GigaCheck-Detector-Multi">🤗 GigaCheck detection model | </a>
   <a href="https://huggingface.co/iitolstykh/GigaCheck-Classifier-Multi">🤗 GigaCheck classification model | </a> 
+  <a href="https://huggingface.co/spaces/iitolstykh/GigaCheck"> 🤗 GigaCheck demo | </a>
 </p>
 
 ### Install:
